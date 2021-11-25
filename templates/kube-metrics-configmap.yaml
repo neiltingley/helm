@@ -1,0 +1,106 @@
+{{- if and (eq .Values.mode "DaemonSet") .Values.metrics.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "netprobe.fullname" . }}-metrics
+data:
+  config.yaml: |-
+    plugin-directory: ./plugins
+    monitoring:
+      metrics:
+        delivery-mode: statsd
+    reporters:
+    - name: tcp
+      type: tcp
+      port: {{ .Values.netprobe.reporterPort }}
+    collectors:
+    - name: kube-metrics
+      type: plugin
+      class-name: KubernetesMetricsCollector
+      label-mode: {{ .Values.labelMode }}
+      exclude-non-namespaced: {{ .Values.metrics.excludeNonNamespaced }}
+      {{- if .Values.namespaces }}
+      namespaces:
+      {{- $root := . }}
+      {{- range $k, $v := .Values.namespaces }}
+      - {{ tpl $v $root | quote }}
+      {{- end }}
+      {{- end }}
+      processors:
+      {{ include "netprobe.collectorEnrichmentProcessors" . | nindent 6 | trim }}
+      {{- /*
+        Only forward data points that are not node-specific.  This is due to
+        netprobe limitation where two netprobes cannot report for the same
+        managed entity. Node-specific metrics are handled by each DaemonSet instance.
+      */}}
+      - type: drop-filter
+        matchers:
+        - type: dimension
+          key: node_name
+          value-pattern: .+
+    workflow:
+      metrics:
+        store:
+          type: memory
+          capacity: {{ .Values.agent.metricsQueueSize }}
+      events:
+        store:
+          type: memory
+  logback.xml: |-
+    <configuration>
+      <appender name="stdout" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+          <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger - %msg%n</pattern>
+        </encoder>
+      </appender>
+      {{- range $k, $v := .Values.agent.logging.loggers }}
+      <logger name="{{ $k }}" level="{{ $v }}" />
+      {{- end }}
+      <root level="{{ .Values.agent.logging.rootLevel }}">
+        <appender-ref ref="stdout" />
+      </root>
+    </configuration>
+  config.xml: |-
+    <netprobe compatibility="1"
+              xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+              xsi:noNamespaceSchemaLocation="http://schema.itrsgroup.com/GA2011.2-110303/netprobe.xsd">
+      <selfAnnounce>
+        <enabled>true</enabled>
+        <retryInterval>{{ .Values.netprobe.retryInterval }}</retryInterval>
+        <requireReverseConnection>{{ .Values.netprobe.requireReverseConnection }}</requireReverseConnection>
+        <probeName>{{ .Values.deployment.probeName }}</probeName>
+        <managedEntity>
+          <name><data>Health_</data><hostname/></name>
+          <attributes>
+            <attribute name="Cluster">{{ .Values.cluster }}</attribute>
+            {{- range $k, $v := .Values.managedEntity.attributes }}
+            <attribute name="{{ $k }}">{{ $v }}</attribute>
+            {{- end }}
+          </attributes>
+          <types>
+            {{- range $k, $v := .Values.managedEntity.types }}
+            <type>{{ $v }}</type>
+            {{- end }}
+          </types>
+        </managedEntity>
+        <collectionAgent>
+          <run>false</run>
+          <reporterPort>{{ .Values.netprobe.reporterPort }}</reporterPort>
+        </collectionAgent>
+        <dynamicEntities>
+          {{- range $k, $v := .Values.dynamicEntities.mappingTypes }}
+          <mappingType>{{ $v }}</mappingType>
+          {{- end }}
+        </dynamicEntities>
+        <gateways>
+          {{- range $k, $v := .Values.gateways }}
+          <gateway>
+            <hostname>{{ $v.host }}</hostname>
+            <port>{{ $v.port }}</port>
+            <secure>{{ $v.secure }}</secure>
+          </gateway>
+          {{- end }}
+        </gateways>
+      </selfAnnounce>
+    </netprobe>
+{{- end }}

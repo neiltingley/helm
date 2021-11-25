@@ -1,0 +1,228 @@
+{{- $kubeLogCollectionEnabled := false }}
+{{- $daemonSetMode := false }}
+{{- $outboundLogRouting := false }}
+{{- $inboundRouting := false }}
+{{- if eq .Values.mode "DaemonSet" }}
+{{- $daemonSetMode = true }}
+{{- end }}
+{{- if and $daemonSetMode .Values.logs.enabled .Values.persistence.enabled }}
+{{- $kubeLogCollectionEnabled = true }}
+{{- end }}
+{{- if .Values.routing.outbound.enabled }}
+{{- range $i, $profile := .Values.routing.outbound.profiles }}
+{{- if has "logs" $profile.pipelines }}
+{{- $outboundLogRouting = true }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.routing.inbound.enabled }}
+{{- $inboundRouting = true }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "netprobe.fullname" . }}
+data:
+  config.yaml: |-
+    plugin-directory: ./plugins
+    monitoring:
+      metrics:
+        enabled: {{ .Values.metrics.enabled }}
+    reporters:
+    - name: tcp
+      type: tcp
+      port: {{ .Values.netprobe.reporterPort }}
+    {{- if and $kubeLogCollectionEnabled $outboundLogRouting }}
+    {{- range $i, $profile := .Values.routing.outbound.profiles }}
+    {{- range $j, $route := $profile.routes }}
+    - name: "grpc-{{ $route.target.grpc.hostname }}"
+      type: plugin
+      class-name: GrpcBatchLogEventReporter
+      hostname: {{ required "routing.outbound.profiles.routes.target.grpc.hostname is required" $route.target.grpc.hostname }}
+      port: {{ $route.target.grpc.port }}
+      batch:
+        size: 50
+        release-timeout: 100
+        max-retries: -1
+        recovery-interval: 30000
+      store-and-forward:
+        directory: /var/lib/geneos/collection-agent
+    {{- end }}
+    {{- end }}
+    {{- range $i, $profile := .Values.routing.outbound.profiles }}
+    - name: router{{ $i }}
+      type: routing
+      route-type: {{ $profile.routeType }}
+      routes:
+      {{- range $j, $route := $profile.routes }}
+      - reporter: "grpc-{{ $route.target.grpc.hostname }}"
+        match: {{ $route.match }}
+        matchers:
+        {{- toYaml $route.matchers | nindent 8 }}
+      {{- end }}
+      {{- /* Implicit catch-all to send all unmatched data points to the TCP reporter of this instance. */}}
+      - reporter: tcp
+        match: any
+        matchers:
+        - type: name
+          pattern: .*
+    {{- end }}
+    {{- end }}
+    collectors:
+    {{- if .Values.metrics.enabled }}
+    {{- if .Values.statsd.enabled }}
+    - name: statsd
+      type: plugin
+      class-name: StatsdServer
+      stale-metrics-threshold: {{ .Values.statsd.staleThreshold | int }}
+      transport-protocol: {{ .Values.statsd.protocol }}
+      listen-port: {{ .Values.statsd.port }}
+      processors:
+      {{ include "netprobe.collectorEnrichmentProcessors" . | nindent 6 | trim }}
+    {{- end }}
+    - name: kube-metrics
+      type: plugin
+      class-name: KubernetesMetricsCollector
+      label-mode: {{ .Values.labelMode }}
+      exclude-non-namespaced: {{ .Values.metrics.excludeNonNamespaced }}
+      {{- if .Values.namespaces }}
+      namespaces:
+      {{- $root := . }}
+      {{- range $k, $v := .Values.namespaces }}
+      - {{ tpl $v $root | quote }}
+      {{- end }}
+      {{- end }}
+      processors:
+      {{ include "netprobe.collectorEnrichmentProcessors" . | nindent 6 | trim }}
+      {{- if $daemonSetMode }}
+      {{- /*
+        Only forward data points related to this node.  This is due to netprobe limitation
+        where two netprobes cannot report for the same managed entity.
+        Metrics/Events that are not specific to a node are handled by the kube-metrics deployment.
+      */}}
+      - type: forward-filter
+        matchers:
+        - type: dimension
+          key: node_name
+          value: ${env:NODE_NAME}
+      {{- end }}
+    {{- end }}
+    {{- if $kubeLogCollectionEnabled }}
+    - name: kube-logs
+      type: plugin
+      class-name: KubernetesLogCollector
+      log-directory: /var/log/containers
+      persistence-directory: /var/lib/geneos/collection-agent/log-collector
+      read-from-beginning: {{ .Values.logs.readFromBeginning }}
+      label-mode: {{ .Values.labelMode }}
+      {{- if .Values.namespaces }}
+      includes:
+      {{- $root := . }}
+      {{- range $k, $v := .Values.namespaces }}
+      - namespace: {{ tpl $v $root | quote }}
+      {{- end }}
+      {{- end }}
+      processors:
+      {{ include "netprobe.collectorEnrichmentProcessors" . | nindent 6 | trim }}
+    {{- end }}
+    {{- if and (not $daemonSetMode) .Values.routing.inbound.enabled }}
+    - name: grpc
+      type: plugin
+      class-name: GrpcLogEventCollector
+      port: 7264
+      {{- /* It is critical to avoid enriching data points coming from this collector. */}}
+    {{- end }}
+    workflow:
+      store-directory: /var/lib/geneos/collection-agent
+      metrics:
+        reporter: tcp
+        store:
+          type: memory
+          capacity: {{ .Values.agent.metricsQueueSize }}
+      events:
+        reporter: tcp
+        store:
+          {{- if and $daemonSetMode .Values.persistence.enabled }}
+          type: disk
+          {{- else }}
+          type: memory
+          {{- end }}
+      {{- if or $kubeLogCollectionEnabled $inboundRouting }}
+      logs:
+        {{- if $outboundLogRouting }}
+        {{- $found := false }}
+        {{- range $i, $profile := .Values.routing.outbound.profiles }}
+        {{- if and (has "logs" $profile.pipelines) (not $found) }}
+        {{- $found = true }}
+        reporter: router{{ $i }}
+        {{- end }}
+        {{- end }}
+        {{- else }}
+        reporter: tcp
+        {{- end }}
+        store:
+          type: disk
+      {{- end }}
+
+  logback.xml: |-
+    <configuration>
+      <appender name="stdout" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+          <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger - %msg%n</pattern>
+        </encoder>
+      </appender>
+      {{- range $k, $v := .Values.agent.logging.loggers }}
+      <logger name="{{ $k }}" level="{{ $v }}" />
+      {{- end }}
+      <root level="{{ .Values.agent.logging.rootLevel }}">
+        <appender-ref ref="stdout" />
+      </root>
+    </configuration>
+
+  config.xml: |-
+    <netprobe compatibility="1"
+              xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+              xsi:noNamespaceSchemaLocation="http://schema.itrsgroup.com/GA2011.2-110303/netprobe.xsd">
+      <selfAnnounce>
+        <enabled>true</enabled>
+        <retryInterval>{{ .Values.netprobe.retryInterval }}</retryInterval>
+        <requireReverseConnection>{{ .Values.netprobe.requireReverseConnection }}</requireReverseConnection>
+        {{- if $daemonSetMode }}
+        <probeName>{{ .Values.daemonSet.probeName }}</probeName>
+        {{- else }}
+        <probeName>{{ .Values.deployment.probeName }}</probeName>
+        {{- end }}
+        <managedEntity>
+          <name><data>Health_</data><hostname/></name>
+          <attributes>
+            <attribute name="Cluster">{{ .Values.cluster }}</attribute>
+            {{- range $k, $v := .Values.managedEntity.attributes }}
+            <attribute name="{{ $k }}">{{ $v }}</attribute>
+            {{- end }}
+          </attributes>
+          <types>
+            {{- range $k, $v := .Values.managedEntity.types }}
+            <type>{{ $v }}</type>
+            {{- end }}
+          </types>
+        </managedEntity>
+        <collectionAgent>
+          <run>false</run>
+          <reporterPort>{{ .Values.netprobe.reporterPort }}</reporterPort>
+        </collectionAgent>
+        <dynamicEntities>
+          {{- range $k, $v := .Values.dynamicEntities.mappingTypes }}
+          <mappingType>{{ $v }}</mappingType>
+          {{- end }}
+        </dynamicEntities>
+        <gateways>
+          {{- range $k, $v := .Values.gateways }}
+          <gateway>
+            <hostname>{{ required "Gateway hostname must be configured" $v.host }}</hostname>
+            <port>{{ $v.port }}</port>
+            <secure>{{ $v.secure }}</secure>
+          </gateway>
+          {{- end }}
+        </gateways>
+      </selfAnnounce>
+    </netprobe>

@@ -1,0 +1,6 @@
+apiVersion: v2
+appVersion: 5.10.1
+description: ITRS Geneos Netprobe for Kubernetes
+name: netprobe
+type: application
+version: 5.10.2

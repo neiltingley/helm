@@ -1,0 +1,50 @@
+{{- if .Values.role.create }}
+{{- $root := . }}
+{{- range $k,$ns := .Values.namespaces }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "netprobe.roleName" $ }}
+  namespace: {{ tpl $ns $root | quote }}
+  labels:
+    {{- include "netprobe.labels" $ | nindent 4 }}
+rules:
+- apiGroups:
+  - ""
+  verbs:
+  - get
+  - list
+  - watch
+  resources:
+  - pods
+  - resourcequotas
+  - events
+- apiGroups:
+  - apps
+  verbs:
+  - get
+  resources:
+  - replicasets
+- apiGroups:
+  - batch
+  verbs:
+  - get
+  resources:
+  - jobs
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "netprobe.roleName" $ }}
+  namespace: {{ tpl $ns $root | quote }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "netprobe.serviceAccountName" $ }}
+  namespace: {{ $.Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "netprobe.roleName" $ }}
+  apiGroup: rbac.authorization.k8s.io
+---
+{{- end }}
+{{- end }}

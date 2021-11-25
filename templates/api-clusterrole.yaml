@@ -1,0 +1,50 @@
+{{- if .Values.clusterRole.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "netprobe.clusterRoleName" . }}
+  labels:
+    {{- include "netprobe.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - ""
+  verbs:
+  - get
+  - list
+  - watch
+  resources:
+  - nodes
+  - nodes/proxy
+  {{- if eq (len .Values.namespaces) 0 }}
+  - events
+  - pods
+  - resourcequotas
+- apiGroups:
+  - apps
+  verbs:
+  - get
+  resources:
+  - replicasets
+- apiGroups:
+  - batch
+  verbs:
+  - get
+  resources:
+  - jobs
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "netprobe.clusterRoleName" . }}
+  labels:
+    {{- include "netprobe.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "netprobe.clusterRoleName" . }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "netprobe.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+{{- end }}

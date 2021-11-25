@@ -1,0 +1,162 @@
+{{- if eq .Values.mode "DaemonSet" }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "netprobe.fullname" . }}
+  labels:
+    {{- include "netprobe.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "netprobe.matchLabels" . | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        {{- include "netprobe.labels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccount: {{ include "netprobe.serviceAccountName" . }}
+      terminationGracePeriodSeconds: 30
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.daemonSet.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.daemonSet.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.daemonSet.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: netprobe
+        image: "{{ .Values.netprobe.image.repository }}:{{ .Values.netprobe.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.netprobe.image.pullPolicy }}
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/netprobe
+          readOnly: true
+        command: [ "/opt/netprobe/netprobe.linux_64", "-setup", "/etc/netprobe/config.xml" ]
+        securityContext:
+          {{- toYaml .Values.netprobe.securityContext | nindent 12 }}
+        env:
+        - name: DISABLE_MEM_PROTECTION
+          value: "true"
+        - name: FLUSH_DNS_PERIOD
+          value: "30"
+        readinessProbe:
+          httpGet:
+            path: /liveness
+            port: 7036
+          periodSeconds: 10
+          failureThreshold: 6
+        livenessProbe:
+          httpGet:
+            path: /liveness
+            port: 7036
+          initialDelaySeconds: 60
+      - name: collection-agent
+        image: "{{ .Values.agent.image.repository }}:{{ .Values.agent.image.tag }}"
+        imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
+        command: [
+          "java",
+          "-XX:+UseContainerSupport",
+          "-XX:InitialRAMPercentage={{ .Values.agent.heapSizePercent }}",
+          "-XX:MaxRAMPercentage={{ .Values.agent.heapSizePercent }}",
+          "-Dlogback.configurationFile=/app/config/logback.xml",
+          "-jar",
+          "/app/collection-agent.jar",
+          "/app/config/config.yaml"
+        ]
+        securityContext:
+          {{- toYaml .Values.agent.securityContext | nindent 12 }}
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/config
+          readOnly: true
+        {{- if .Values.persistence.enabled }}
+        - name: persistence
+          mountPath: /var/lib/geneos/collection-agent
+          readOnly: false
+        {{- if .Values.logs.enabled }}
+        - name: container-logs
+          mountPath: /var/log/containers
+          readOnly: true
+        - name: pod-logs
+          mountPath: /var/log/pods
+          readOnly: true
+        - name: docker-logs
+          mountPath: /var/lib/docker/containers
+          readOnly: true
+        {{- end }}
+        {{- end }}
+        ports:
+        {{- if .Values.statsd.enabled }}
+        - containerPort: {{ .Values.statsd.port }}
+          hostPort: {{ .Values.statsd.port }}
+          protocol: {{ .Values.statsd.protocol }}
+        {{- end }}
+        readinessProbe:
+          httpGet:
+            port: 8080
+            path: /healthcheck
+          periodSeconds: 10
+          failureThreshold: 6
+        livenessProbe:
+          httpGet:
+            port: 8080
+            path: /healthcheck
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          failureThreshold: 3
+        env:
+        - name: CLUSTER_NAME
+          value: {{ required "cluster name is required" .Values.cluster }}
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: CONTAINER_NAME
+          value: "collection-agent"
+        resources:
+          {{- toYaml .Values.agent.resources | nindent 12 }}
+      volumes:
+      - name: config-volume
+        configMap:
+          name: {{ include "netprobe.fullname" . }}
+      {{- if .Values.persistence.enabled }}
+      - name: persistence
+        hostPath:
+          path: {{ tpl .Values.persistence.directory . }}
+          type: DirectoryOrCreate
+      {{- if .Values.logs.enabled }}
+      - name: container-logs
+        hostPath:
+          path: {{ .Values.logs.directories.containerLogs }}
+      - name: pod-logs
+        hostPath:
+          path: {{ .Values.logs.directories.podLogs }}
+      - name: docker-logs
+        hostPath:
+          path: {{ .Values.logs.directories.dockerLogs }}
+      {{- end }}
+      {{- end }}
+{{- end }}

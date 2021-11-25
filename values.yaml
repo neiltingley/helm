@@ -1,0 +1,285 @@
+# Deployment mode. Can be either DaemonSet (default) or Deployment.
+#
+# In DaemonSet mode, the netprobe is deployed as a DaemonSet to all matching nodes.
+# Each DaemonSet pod collects metrics and logs for the pods on that node only.
+# An additional Deployment is launched, which collects metrics and events that are not
+# node-specific (e.g. ResourceQuotas). This is the only mode that supports log collection.
+#
+# In Deployment mode, the netprobe is deployed as a Deployment.  In this mode,
+# one pod collects metrics for the entire cluster, and log collection is not supported.
+mode: DaemonSet
+
+# Name of the kube cluster (required).
+cluster: ""
+
+# One or more Geneos Gateways to which the Netprobe connects.
+# At least one is required.
+gateways:
+- host: ""  # Required hostname of the gateway.
+  port: 7039
+  secure: false
+
+managedEntity:
+  # Types (array of strings).
+  types:
+  - Health
+
+  # Attribute key:value pairs.
+  attributes:
+    Type: Static
+    Environment: Kubernetes
+    Application: geneos
+
+# Dynamic entity mappings.
+dynamicEntities:
+  mappingTypes:
+  - Kubernetes
+
+# Dimension key:value pairs to add to all data points.
+customDimensions:
+- cluster_name: "${env:CLUSTER_NAME}"
+
+# How to collect Kubernetes object labels.
+#   legacy:      Default legacy behavior (before version 2.3.0) - metric collector ignores labels, log collector sends as dimensions.
+#   attributes:  Labels are collected as attributes.
+#   disabled:    Labels are ignored and not collected.
+labelMode: legacy
+
+# Namespaces for which to collect metrics and logs.
+# If undefined, all namespaces are collected.
+# Templated values may be defined here, e.g. "{{ .Release.Namespace }}".
+namespaces: []
+
+# Metric collection settings.
+metrics:
+  # Whether to collect metrics and events.
+  enabled: true
+
+  # Exclude metrics that are not part of a namespace (e.g. node metrics).
+  excludeNonNamespaced: false
+
+# Log collection settings.
+logs:
+  # Whether to enable log collection.
+  enabled: true
+
+  # Locations for logs produced by Kubernetes and Docker.
+  directories:
+    containerLogs: /var/log/containers
+    podLogs: /var/log/pods
+    dockerLogs: /var/lib/docker/containers
+
+  # Whether to read from beginning of a newly discovered log.
+  # If false, the file is tailed.
+  readFromBeginning: false
+
+# Persistence for the agent's store and log collector positions.
+persistence:
+
+  # If false, log collection will be disabled since it requires persistence.
+  enabled: true
+
+  # Directory where DaemonSet persistence files are stored.
+  # This is a HostPath that will be created on each node.
+  directory: /var/lib/geneos/collection-agent-{{ .Release.Name }}
+
+  # Size of the PVC used by the deployment.
+  deploymentClaimSize: 10Gi
+
+# Statsd settings.
+statsd:
+  # Enabled by default.
+  enabled: true
+
+  # UDP or TCP.
+  protocol: UDP
+
+  # Server port.
+  port: 8125
+
+  # Timeout, in milliseconds, after which a stale metric is removed and no longer reported.
+  # Defaults to 30 minutes.
+  staleThreshold: 1800000
+
+  # Statsd service settings.
+  # Only applicable when deployment mode is "Deployment".  In DaemonSet mode, the statsd
+  # server is exposed directly on each node.
+  service:
+
+    # Optionally override the name of the statsd service.  If undefined, the service
+    # name will be "<release_name>-statsd".
+    name: ""
+
+# Data point routing, i.e. for chaining Collection Agents together.
+routing:
+
+  # Routing from this instance to another.
+  outbound:
+
+    # Disabled by default.
+    enabled: false
+
+    # Routing profiles.
+    profiles:
+
+      # The pipelines to which this profile should be applied.  Currently only "logs" is supported.
+      # Note that each pipeline can only appear once across all profiles - if a pipeline is
+      # erroneously defined multiple times, only the first instance will be used.
+    - pipelines:
+      - logs
+
+      # Route via 'first' (the first matching route) or 'all' (all matching routes).
+      routeType: first
+
+      # List of routes.
+      #
+      # There is an implicit catch-all route which matches any otherwise unmatched data points
+      # and sends them via the local netprobe.
+      routes:
+
+        # The target (only grpc supported).
+      - target:
+          grpc:
+            hostname: ""
+            port: 7624
+
+        # Match via 'any' matcher (OR) or 'all' matchers (AND)
+        match: any
+
+        # List of matchers evaluated in order.
+        matchers:
+          # Match by dimension. The pattern is parsed as regex.
+        - type: dimension
+          key: namespace
+          pattern: my-namespace
+
+  # Routing into this instance from another.
+  inbound:
+    # Disabled by default.
+    enabled: false
+    service:
+      port: 80
+
+# Image pull secret(s) required for connecting to the ITRS Docker registry.
+imagePullSecrets:
+- name: itrsdocker
+
+# Netprobe container settings.
+netprobe:
+  image:
+    repository: docker.itrsgroup.com/netprobe
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  retryInterval: 30
+  requireReverseConnection: true
+
+  # TCP port used for communication between netprobe and agent.
+  reporterPort: 7137
+
+  # Container limits/requests.
+  # It is strongly recommended to set this.  A good starting point is shown below.
+  resources: {}
+  #  limits:
+  #    cpu: "1"
+  #    memory: "1Gi"
+  #  requests:
+  #    cpu: "500m"
+  #    memory: "768Mi"
+
+  # Container security context.
+  securityContext:
+    runAsUser: 1000
+
+# Agent container settings.
+agent:
+  image:
+    repository: docker.itrsgroup.com/collection/collection-agent
+    tag: "2.3.0-jre8-r2"
+    pullPolicy: IfNotPresent
+
+  # Logger configuration - should be changed only for troubleshooting.
+  logging:
+    rootLevel: "info"
+    loggers:
+      io.kubernetes.client: "off"
+
+  # Container limits/requests.
+  # It is strongly recommended to set this.  A good starting point is shown below.
+  resources: {}
+  #  limits:
+  #    cpu: "1"
+  #    memory: "1Gi"
+  #  requests:
+  #    cpu: "500m"
+  #    memory: "768Mi"
+
+  # Percentage of the container's memory limit allocated to the JVM heap.
+  # It is strongly recommended to set resource limits, otherwise this percentage
+  # applies to the available RAM on the node. The decimal place is required in Java 8.
+  heapSizePercent: "75.0"
+
+  # Size of the in-memory metrics queue.
+  metricsQueueSize: 8192
+
+  # Container security context.
+  securityContext: {}
+
+# Pod settings for the DaemonSet.
+daemonSet:
+  # Name of the netprobe.
+  probeName: "<hostname/>"
+
+  # Pod assignment.
+  affinity: {}
+  nodeSelector: {}
+  tolerations: []
+
+# Pod settings for the Deployment.
+deployment:
+  # Name of the netprobe.
+  probeName: "<hostname/>"
+
+  # Pod assignment.
+  affinity: {}
+  nodeSelector: {}
+  tolerations: []
+
+# Custom annotations for all pods.
+podAnnotations: {}
+
+# ClusterRole required for accessing the kube API to read non-namespaced resources (e.g. nodes and nodes/proxy)
+# and to collect metrics/events across all namespaces.
+clusterRole:
+  # Whether to create the role.
+  create: true
+
+  # Role name.
+  # If not set and create is true, a name is generated using the fullname template.
+  # To use a custom role, set "create" to false and set the name.
+  name: ""
+
+# Role used when accessing the kube API to collect metrics/events for specific namespaces.
+# This is only created if one or more values are configured for "metrics.namespaces", otherwise
+# the ClusterRole is created with permission to access all namespaces.
+role:
+  # Whether to create the role.
+  create: true
+
+  # Role name.
+  # If not set and create is true, a name is generated using the fullname template.
+  # To use a custom role, set "create" to false and set the name.
+  name: ""
+
+# Service account used by all containers.
+serviceAccount:
+  # Whether to create the account.
+  create: true
+
+  # Account name.
+  # If not set and create is true, a name is generated using the fullname template.
+  # To use a custom service account, set "create" to false and set the name.
+  name: ""
+
+  # Custom annotations.
+  annotations: {}

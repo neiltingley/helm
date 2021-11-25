@@ -1,0 +1,19 @@
+{{- if and (eq .Values.mode "Deployment") .Values.statsd.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  {{- if .Values.statsd.service.name }}
+  name: {{ .Values.statsd.service.name }}
+  {{- else }}
+  name: {{ include "netprobe.fullname" . }}-statsd
+  {{- end }}
+  labels:
+    {{- include "netprobe.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "netprobe.selectorLabels" . | nindent 4 }}
+  ports:
+  - protocol: {{ .Values.statsd.protocol }}
+    port: {{ .Values.statsd.port }}
+{{- end }}

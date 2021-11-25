@@ -1,0 +1,16 @@
+{{- if and (eq .Values.mode "Deployment") .Values.routing.inbound.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "netprobe.fullname" . }}-inbound-routing
+  labels:
+    {{- include "netprobe.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "netprobe.selectorLabels" . | nindent 4 }}
+  ports:
+  - protocol: TCP
+    port: {{ .Values.routing.inbound.service.port }}
+    targetPort: 7264
+{{- end }}

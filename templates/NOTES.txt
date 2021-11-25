@@ -1,0 +1,6 @@
+You have installed {{ .Chart.Name }} as a release named {{ .Release.Name }}.
+
+To learn more about the release, try:
+
+  $ helm status {{ .Release.Name }}
+  $ helm get all {{ .Release.Name }}
